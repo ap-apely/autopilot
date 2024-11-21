@@ -1,10 +1,11 @@
-from runmidas import run
-from midas.model_loader import load_model, default_models
+from .runmidas import run
+from .midas.model_loader import load_model, default_models
 import torch
-from astar import path_planning
-from utils.plots import plot_one_box
+from .astar import path_planning
+from .utils.plots import plot_one_box
 import random
 import cv2
+import numpy as np
 
 def midad_preprocess(img: str, model_path: str) -> None:
     """
@@ -43,64 +44,47 @@ def midad_preprocess(img: str, model_path: str) -> None:
     return midas_img, midas_names, midas_colors
 
 def path_plan(det, midas_img, draw_boxes, midas_names, midas_colors, midas_frame) -> None:
+    # Create visualization window with grid lines pre-drawn
+    background = np.zeros((500, 500, 3), dtype=np.uint8)
+    
+    # Draw grid more efficiently using array operations
+    background[:, ::50] = (50, 50, 50)
+    background[::50, :] = (50, 50, 50)
+    
+    # Convert detections to obstacle points more efficiently
     external_points_set = []
-    for *xyxy, conf, cls in reversed(det):  
-        if draw_boxes:  # Add bbox to image
+    for *xyxy, conf, cls in reversed(det):
+        if draw_boxes:
             label = f'{midas_names[int(cls)]} {conf:.2f}'
             plot_one_box(xyxy, midas_frame, label=label, color=midas_colors[int(cls)], line_thickness=2)
-            plot_one_box(xyxy, midas_img, label=label, color=None, line_thickness=1)
-
-        external_points_set.append((int((int(xyxy[0])+int(xyxy[2]))/2), int(xyxy[3])))
-
-    if external_points_set != None:
-        for external_point in external_points_set.copy():
-            height, width, channel = car.shape
-            # print(f"height {height}, width {width}")
-            # external point should be center but due to opencv its top left corner
-
-            x, y = external_point
-            # opencv point is shift of origin
-            opencv_point = (x-int(height/2), y-int(width/2))
-            x, y = opencv_point
-
-            # error checking for out of region points
-            if x <= 0 or y <= 0:
-                # print(f"point {external_point} is not displayed on top view beacause its out of region")
-                external_points_set.remove(external_point)
-                continue
-            # print(f"opencv points {x} and  {y}")
-
-            # I want to put logo on opencv point, So I create a ROI
-            rows,cols,channels = car.shape
-            # print(f"rows {rows}, columns {cols}")
-
-            # error checking for out of region points
-            if rows+x >= background_height or cols+y >= background_width:
-                # print(f"point {external_point} is not displayed on top view beacause its out of region")
-                external_points_set.remove(external_point)
-                continue
-
-            roi = background[x:rows+x, y:cols+y ]
-
-            # Now create a mask of logo and create its inverse mask also
-            img2gray = cv2.cvtColor(car,cv2.COLOR_BGR2GRAY)
-            ret, mask = cv2.threshold(img2gray, 10, 255, cv2.THRESH_BINARY)
-            mask_inv = cv2.bitwise_not(mask)
-
-            # Now black-out the area of logo in ROI
-            img1_bg = cv2.bitwise_and(roi,roi,mask = mask_inv)
-
-            # Take only region of logo from logo image.
-            img2_fg = cv2.bitwise_and(car,car,mask = mask)
-
-
-            # Put logo in ROI and modify the main image
-            dst = cv2.add(img1_bg,img2_fg)
-            background[x:rows+x, y:cols+y ] = dst
-
-        path=path_planning(external_points_set)
-        if path!=None:        
-            for i in path:
-                background= cv2.circle(background,(i[1],i[0]), radius=0, color=(188, 145, 42), thickness=-1)
-        else:
-            pass
+        
+        # Get bottom center point and scale in one operation
+        x_center = int((int(xyxy[0]) + int(xyxy[2])) / 2 * 500 / midas_frame.shape[1])
+        y_bottom = int(int(xyxy[3]) * 500 / midas_frame.shape[0])
+        
+        external_points_set.append((y_bottom, x_center))
+        cv2.circle(background, (x_center, y_bottom), 10, (0, 0, 255), -1)
+    
+    # Calculate path using A* algorithm
+    if external_points_set:
+        path = path_planning(external_points_set)
+        if path:
+            # Draw path more efficiently
+            path_points = np.array(path)
+            for i in range(len(path)-1):
+                pt1 = (path_points[i][1], path_points[i][0])
+                pt2 = (path_points[i+1][1], path_points[i+1][0])
+                cv2.line(background, pt1, pt2, (0, 255, 0), 2)
+                cv2.circle(background, pt1, 3, (0, 255, 255), -1)
+            
+            # Draw start and goal points
+            cv2.circle(background, (path_points[0][1], path_points[0][0]), 5, (255, 0, 0), -1)
+            cv2.circle(background, (path_points[-1][1], path_points[-1][0]), 5, (0, 255, 0), -1)
+    
+    # Add text labels
+    cv2.putText(background, "Path Planning Visualization", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(background, "Red: Obstacles", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    cv2.putText(background, "Green: Path", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    cv2.putText(background, "Blue: Start", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+    
+    return background

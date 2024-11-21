@@ -3,15 +3,15 @@
 import os
 import glob
 import torch
-import utils
+from .utils_midas import *
 import cv2
 import argparse
 import time
 
 import numpy as np
 
-from utils.video import VideoStream
-from midas.model_loader import default_models, load_model
+from imutils.video import VideoStream
+from .midas.model_loader import default_models, load_model
 
 first_execution = True
 def process(device, model, model_type, image, input_size, target_size, optimize, use_camera):

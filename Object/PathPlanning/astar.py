@@ -1,5 +1,6 @@
 import heapq
 import math
+import numpy as np
 
 # Define the heuristic function using diagonal distance
 def diagonal_distance(current, goal):
@@ -38,7 +39,7 @@ def a_star(start, goal, grid):
             neighbor = (current[0] + dx, current[1] + dy)
 
             # Skip if the neighbor is not in the grid or is an obstacle or is in the closed set
-            if not (0 <= neighbor[0] < len(grid) and 0 <= neighbor[1] < len(grid[0])) or grid[neighbor[0]][neighbor[1]] == 1 or neighbor in closed_set:
+            if not (0 <= neighbor[0] < grid.shape[0] and 0 <= neighbor[1] < grid.shape[1]) or grid[neighbor[0]][neighbor[1]] == 1 or neighbor in closed_set:
                 continue
 
             # Calculate the tentative cost to reach the neighbor
@@ -56,32 +57,40 @@ def a_star(start, goal, grid):
     return None
 
 def update_grid(grid, coord, length):
-    try:
-        row, col = coord
-        # print(grid,coord)
-        for i in range(row - length, row + length + 1):
-            # print("THIS IS THE GRID TYPE",type(grid))
-            for j in range(col - length, col + length + 1):
-                if (i != row or j != col) and (i - row) ** 2 + (j - col) ** 2 <= length ** 2:
-                    # print("THIS IS 0th INDEX OF GRID",grid[0])
-                    if (0 <= i < len(grid)) and (0 <= j < len(grid[0])):
-                        grid[i][j] = 1
-        return grid            
-    except:
-        return grid
-
-
+    row, col = coord
+    # Create a mask for circular region
+    y, x = np.ogrid[-length:length+1, -length:length+1]
+    mask = x*x + y*y <= length*length
+    
+    # Calculate bounds for the region to update
+    row_start = max(0, row - length)
+    row_end = min(grid.shape[0], row + length + 1)
+    col_start = max(0, col - length)
+    col_end = min(grid.shape[1], col + length + 1)
+    
+    # Calculate the corresponding section of the mask
+    mask_row_start = max(0, length - row)
+    mask_row_end = mask.shape[0] - max(0, row + length + 1 - grid.shape[0])
+    mask_col_start = max(0, length - col)
+    mask_col_end = mask.shape[1] - max(0, col + length + 1 - grid.shape[1])
+    
+    # Update the grid using the mask
+    grid[row_start:row_end, col_start:col_end] |= mask[mask_row_start:mask_row_end, mask_col_start:mask_col_end]
+    
+    return grid
 
 def path_planning(obs):
-    grid_size = 500                
-    grid = [[0]*grid_size for i in range(grid_size)]
+    grid_size = 500
+    grid = np.zeros((grid_size, grid_size), dtype=np.uint8)
+    
+    # Update grid for all obstacles at once
     for i in obs:
-        grid=update_grid( grid , (i[ 0 ],i[ 1 ]) , 50 )
-    start = (grid_size - 1, math.floor( grid_size/2))
-    goal = (0, math.floor( grid_size/2 ) )
-    # grid[start[ 0 ]][start[ 1 ]]=2
-    # grid[goal[ 0 ]][goal[  1] ]=3
-    path = a_star( start, goal, grid )
+        grid = update_grid(grid, (i[0], i[1]), 50)
+    
+    start = (grid_size - 1, grid_size // 2)
+    goal = (0, grid_size // 2)
+    
+    path = a_star(start, goal, grid)
     # for i in path:
     #     grid[i[0]][i[1]]=7
     # for i in grid:
@@ -91,5 +100,3 @@ def path_planning(obs):
     # else:
     #     print("error")
     return path
-
-

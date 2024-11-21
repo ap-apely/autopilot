@@ -2,6 +2,10 @@ import cv2, time
 import numpy as np
 import logging
 import pycuda.driver as drv
+import rich
+from rich.console import Console
+from rich.table import Table
+import time
 
 """
 Object imports:
@@ -14,6 +18,7 @@ from Road.taskConditions import TaskConditions, Logger
 from Object.ObjectDetector.yoloDetector import YoloDetector
 from Object.ObjectDetector.utils import ObjectModelType,  CollisionType
 from Object.ObjectDetector.distanceMeasure import SingleCamDistanceMeasure
+from Object.PathPlanning.path import path_plan
 
 """
 Lines imports:
@@ -70,6 +75,9 @@ class ControlPanel(object):
 		right_lanes_img = cv2.imread('./App/assets/LTA-right_lanes.png', cv2.IMREAD_UNCHANGED)
 		self.right_lanes_img = cv2.resize(right_lanes_img, (300, 200))
 
+		# Path planning visualization
+		self.path_window = np.zeros((500, 500, 3), dtype=np.uint8)
+		cv2.namedWindow("Path Planning")
 
 		# FPS
 		self.fps = 0
@@ -210,48 +218,95 @@ class ControlPanel(object):
 		cv2.putText(main_show, "object-infer : %.2f s" % obect_infer_time, ( main_show.shape[1]- int(W) + 100, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
 		cv2.putText(main_show, "lane-infer : %.2f s" % lane_infer_time, ( main_show.shape[1]- int(W) + 100, 320), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
 		
+	def DisplayPathPlanning(self, frame, objectDetector):
+		"""
+		Display path planning visualization in a separate window
+		"""
+		if hasattr(objectDetector, '_object_info') and objectDetector._object_info:
+			# Convert detections to format expected by path_plan
+			det_list = []
+			for obj in objectDetector._object_info:
+				x1, y1, x2, y2 = obj.tolist()
+				conf = obj.conf
+				cls = objectDetector.class_names.index(obj.label) if obj.label in objectDetector.class_names else -1
+				det_list.append([x1, y1, x2, y2, conf, cls])
+			
+			# Convert colors dict to list format matching class indices
+			colors_list = [objectDetector.colors_dict[name] for name in objectDetector.class_names]
+			
+			# Call path planning and get visualization
+			path_window = path_plan(det_list, None, True, objectDetector.class_names, colors_list, frame)
+			
+			# Show path planning window
+			if path_window is not None:
+				cv2.imshow("Path Planning", path_window)
+
 def app_run(object_config, line_config, video_path):
-		# Initialize read and save video 
-	cap = cv2.VideoCapture(video_path)
-	if (not cap.isOpened()) :
-		raise Exception("video path is error. please check it.")
-	width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
-	height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-	fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
-	vout = cv2.VideoWriter(video_path[:-4]+'_out.mp4', fourcc , 30.0, (width, height))
-	cv2.namedWindow("ADAS Simulation", cv2.WINDOW_NORMAL)	
+	console = Console()
 	
-	#==========================================================
-	#					Initialize Class
-	#==========================================================
-	LOGGER.info("[Pycuda] Cuda Version: {}".format(drv.get_version()))
-	LOGGER.info("[Driver] Cuda Version: {}".format(drv.get_driver_version()))
-	LOGGER.info("-"*40)
-
-	# lane detection model
-	LOGGER.info("Detector Model Type : {}".format(line_config["model_type"].name))
-	if ( "UFLDV2" in line_config["model_type"].name) :
-		UltrafastLaneDetectorV2.set_defaults(line_config)
-		laneDetector = UltrafastLaneDetectorV2(logger=LOGGER)
-	transformView = PerspectiveTransformation( (width, height) , logger=LOGGER)
-
-	# object detection model
-	LOGGER.info("ObjectDetector Model Type : {}".format(object_config["model_type"].name))
-	YoloDetector.set_defaults(object_config)
-	objectDetector = YoloDetector(logger=LOGGER)
-	distanceDetector = SingleCamDistanceMeasure()
-	objectTracker = BYTETracker(names=objectDetector.colors_dict)
-
-	# display panel
-	displayPanel = ControlPanel()
-	analyzeMsg = TaskConditions()
+	# Create a nice header
+	console.print("\n[bold cyan]🚗 ADAS Simulation System[/bold cyan]", justify="center")
+	console.print("[dim]Advanced Driver Assistance System[/dim]\n", justify="center")
+	
+	with console.status("[bold green]Loading system components...") as status:
+		start_time_loading = time.time()
+		
+		# Initialize read and save video 
+		console.print("[yellow]• Loading video source...[/yellow]")
+		cap = cv2.VideoCapture(video_path)
+		if (not cap.isOpened()):
+			console.print("[red bold]❌ Error: Video path is invalid. Please check it.[/red bold]")
+			raise Exception("video path is error. please check it.")
+			
+		width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
+		height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+		fps = int(cap.get(cv2.CAP_PROP_FPS))
+		fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+		vout = cv2.VideoWriter('./output.mp4', fourcc, fps, (width, height))
+		
+		console.print("[yellow]• Initializing detection models...[/yellow]")
+		# Initialize logger
+		LOGGER = logging.getLogger("YOLO")
+		LOGGER.setLevel(logging.INFO)
+		
+		# Initialize models
+		if ( "UFLDV2" in line_config["model_type"].name) :
+			UltrafastLaneDetectorV2.set_defaults(line_config)
+			laneDetector = UltrafastLaneDetectorV2(logger=LOGGER)
+		transformView = PerspectiveTransformation( (width, height) , logger=LOGGER)
+		YoloDetector.set_defaults(object_config)
+		objectDetector = YoloDetector(logger=LOGGER)
+		distanceDetector = SingleCamDistanceMeasure()
+		objectTracker = BYTETracker(names=objectDetector.colors_dict)
+		# display panel
+		displayPanel = ControlPanel()
+		analyzeMsg = TaskConditions()
+		
+		loading_time = round(time.time() - start_time_loading, 2)
+		console.print(f"[bold green]✓ System loaded successfully in {loading_time}s![/bold green]\n")
+	
+	# Create stats table
+	table = Table(show_header=True, header_style="bold magenta")
+	table.add_column("Component", style="cyan")
+	table.add_column("Status", justify="right", style="green")
+	table.add_column("Time", justify="right", style="yellow")
+	
+	table.add_row("Video Source", "Ready", f"{width}x{height}@{fps}fps")
+	table.add_row("Object Detection", "Active", f"YOLOv8 ({object_config['model_type'].name})")
+	table.add_row("Distance Detection", "Active", "Single Camera")
+	table.add_row("Object Tracking", "Active", "BYTE Tracker")
+	console.print(table)
+	console.print("\n[bold cyan]Press 'Q' to quit simulation[/bold cyan]\n")
+	
+	frame_count = 0
+	total_fps = 0
+	
 	while cap.isOpened():
-
+		frame_start = time.time()
 		ret, frame = cap.read() # Read frame from the video
-		if ret:	
+		if ret:
 			frame_show = frame.copy()
-
+			
 			#========================== Detect Model =========================
 			obect_time = time.time()
 			objectDetector.DetectFrame(frame)
@@ -266,7 +321,7 @@ def app_run(object_config, line_config, video_path):
 			lane_time = time.time()
 			laneDetector.DetectFrame(frame)
 			lane_infer_time = round(time.time() - lane_time, 4)
-
+			
 			#========================= Analyze Status ========================
 			distanceDetector.updateDistance(objectDetector.object_info)
 			vehicle_distance = distanceDetector.calcCollisionPoint(laneDetector.lane_info.area_points)
@@ -284,7 +339,7 @@ def app_run(object_config, line_config, video_path):
 
 			#========================== Draw Results =========================
 			transformView.DrawDetectedOnBirdView(birdview_show, birdview_lanes_points, analyzeMsg.offset_msg)
-			if (LOGGER.clevel == logging.DEBUG) : transformView.DrawTransformFrontalViewArea(frame_show)
+			transformView.DrawTransformFrontalViewArea(frame_show)
 			laneDetector.DrawDetectedOnFrame(frame_show, analyzeMsg.offset_msg)
 			laneDetector.DrawAreaOnFrame(frame_show, displayPanel.CollisionDict[analyzeMsg.collision_msg])
 			objectDetector.DrawDetectedOnFrame(frame_show)
@@ -294,10 +349,33 @@ def app_run(object_config, line_config, video_path):
 			displayPanel.DisplayBirdViewPanel(frame_show, birdview_show)
 			displayPanel.DisplaySignsPanel(frame_show, analyzeMsg.offset_msg, analyzeMsg.curvature_msg)	
 			displayPanel.DisplayCollisionPanel(frame_show, analyzeMsg.collision_msg, obect_infer_time, lane_infer_time )
+			#displayPanel.DisplayPathPlanning(frame_show, objectDetector)  
+			
+			# Calculate and display FPS
+			frame_time = time.time() - frame_start
+			fps = 1 / frame_time
+			frame_count += 1
+			total_fps += fps
+			
+			if frame_count % 30 == 0:  # Update stats every 30 frames
+				avg_fps = total_fps / frame_count
+				console.print(f"[cyan]Frame {frame_count}[/cyan] | [yellow]FPS: {fps:.1f}[/yellow] | [green]Avg FPS: {avg_fps:.1f}[/green]", end="\r")
+			
 			cv2.imshow("ADAS Simulation", frame_show)
-
 		else:
 			break
-		vout.write(frame_show)	
-		if cv2.waitKey(1) == ord('q'): # Press key q to stop
+			
+		vout.write(frame_show)
+		
+		if cv2.waitKey(1) & 0xFF == ord('q'):
 			break
+	
+	# Cleanup
+	console.print("\n\n[bold green]✓ Simulation completed![/bold green]")
+	console.print(f"[yellow]• Processed {frame_count} frames[/yellow]")
+	console.print(f"[yellow]• Average FPS: {total_fps/frame_count:.1f}[/yellow]")
+	console.print("[yellow]• Output saved to: output.mp4[/yellow]")
+	
+	cap.release()
+	vout.release()
+	cv2.destroyAllWindows()
