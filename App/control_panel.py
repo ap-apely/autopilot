@@ -3,6 +3,10 @@ import numpy as np
 import logging
 import pycuda.driver as drv
 import rich
+import asyncio
+import aiofiles
+from concurrent.futures import ThreadPoolExecutor
+
 from rich.console import Console
 from rich.table import Table
 import time
@@ -241,7 +245,7 @@ class ControlPanel(object):
 			if path_window is not None:
 				cv2.imshow("Path Planning", path_window)
 
-def app_run(object_config, line_config, video_path):
+async def app_run(object_config, line_config, video_path):
 	console = Console()
 	
 	# Create a nice header
@@ -278,104 +282,129 @@ def app_run(object_config, line_config, video_path):
 		objectDetector = YoloDetector(logger=LOGGER)
 		distanceDetector = SingleCamDistanceMeasure()
 		objectTracker = BYTETracker(names=objectDetector.colors_dict)
-		# display panel
 		displayPanel = ControlPanel()
 		analyzeMsg = TaskConditions()
 		
+		# Create thread pool for CPU-bound operations
+		thread_pool = ThreadPoolExecutor(max_workers=4)
+		
 		loading_time = round(time.time() - start_time_loading, 2)
 		console.print(f"[bold green]✓ System loaded successfully in {loading_time}s![/bold green]\n")
-	
-	# Create stats table
-	table = Table(show_header=True, header_style="bold magenta")
-	table.add_column("Component", style="cyan")
-	table.add_column("Status", justify="right", style="green")
-	table.add_column("Time", justify="right", style="yellow")
-	
-	table.add_row("Video Source", "Ready", f"{width}x{height}@{fps}fps")
-	table.add_row("Object Detection", "Active", f"YOLOv8 ({object_config['model_type'].name})")
-	table.add_row("Distance Detection", "Active", "Single Camera")
-	table.add_row("Object Tracking", "Active", "BYTE Tracker")
-	console.print(table)
-	console.print("\n[bold cyan]Press 'Q' to quit simulation[/bold cyan]\n")
-	
-	frame_count = 0
-	total_fps = 0
-	
-	while cap.isOpened():
-		frame_start = time.time()
-		ret, frame = cap.read() # Read frame from the video
-		if ret:
-			frame_show = frame.copy()
-			
-			#========================== Detect Model =========================
-			obect_time = time.time()
-			objectDetector.DetectFrame(frame)
-			obect_infer_time = round(time.time() - obect_time, 2)
-
-			if objectTracker :
-				box   = [obj.tolist(format_type= "xyxy") for obj in objectDetector.object_info]
-				score = [obj.conf for obj in objectDetector.object_info]
-				id    = [obj.label for  obj in objectDetector.object_info]
-				objectTracker.update(box, score, id, frame)
-
-			lane_time = time.time()
-			laneDetector.DetectFrame(frame)
-			lane_infer_time = round(time.time() - lane_time, 4)
-			
-			#========================= Analyze Status ========================
-			distanceDetector.updateDistance(objectDetector.object_info)
-			vehicle_distance = distanceDetector.calcCollisionPoint(laneDetector.lane_info.area_points)
-
-			if (analyzeMsg.CheckStatus() and laneDetector.lane_info.area_status ) :
-				transformView.updateTransformParams(*laneDetector.lane_info.lanes_points[1:3], analyzeMsg.transform_status)
-			birdview_show = transformView.transformToBirdView(frame_show)
-
-			birdview_lanes_points = [transformView.transformToBirdViewPoints(lanes_point) for lanes_point in laneDetector.lane_info.lanes_points]
-			(vehicle_direction, vehicle_curvature) , vehicle_offset = transformView.calcCurveAndOffset(birdview_show, *birdview_lanes_points[1:3])
-
-			analyzeMsg.UpdateCollisionStatus(vehicle_distance, laneDetector.lane_info.area_status)
-			analyzeMsg.UpdateOffsetStatus(vehicle_offset)
-			analyzeMsg.UpdateRouteStatus(vehicle_direction, vehicle_curvature)
-
-			#========================== Draw Results =========================
-			transformView.DrawDetectedOnBirdView(birdview_show, birdview_lanes_points, analyzeMsg.offset_msg)
-			transformView.DrawTransformFrontalViewArea(frame_show)
-			laneDetector.DrawDetectedOnFrame(frame_show, analyzeMsg.offset_msg)
-			laneDetector.DrawAreaOnFrame(frame_show, displayPanel.CollisionDict[analyzeMsg.collision_msg])
-			objectDetector.DrawDetectedOnFrame(frame_show)
-			objectTracker.DrawTrackedOnFrame(frame_show, False)
-			distanceDetector.DrawDetectedOnFrame(frame_show)
-
-			displayPanel.DisplayBirdViewPanel(frame_show, birdview_show)
-			displayPanel.DisplaySignsPanel(frame_show, analyzeMsg.offset_msg, analyzeMsg.curvature_msg)	
-			displayPanel.DisplayCollisionPanel(frame_show, analyzeMsg.collision_msg, obect_infer_time, lane_infer_time )
-			#displayPanel.DisplayPathPlanning(frame_show, objectDetector)  
-			
-			# Calculate and display FPS
-			frame_time = time.time() - frame_start
-			fps = 1 / frame_time
-			frame_count += 1
-			total_fps += fps
-			
-			if frame_count % 30 == 0:  # Update stats every 30 frames
-				avg_fps = total_fps / frame_count
-				console.print(f"[cyan]Frame {frame_count}[/cyan] | [yellow]FPS: {fps:.1f}[/yellow] | [green]Avg FPS: {avg_fps:.1f}[/green]", end="\r")
-			
-			cv2.imshow("ADAS Simulation", frame_show)
-		else:
-			break
-			
-		vout.write(frame_show)
+		table = Table(show_header=True, header_style="bold magenta")
+		table.add_column("Component", style="cyan")
+		table.add_column("Status", justify="right", style="green")
+		table.add_column("Time", justify="right", style="yellow")
 		
-		if cv2.waitKey(1) & 0xFF == ord('q'):
-			break
-	
-	# Cleanup
-	console.print("\n\n[bold green]✓ Simulation completed![/bold green]")
-	console.print(f"[yellow]• Processed {frame_count} frames[/yellow]")
-	console.print(f"[yellow]• Average FPS: {total_fps/frame_count:.1f}[/yellow]")
-	console.print("[yellow]• Output saved to: output.mp4[/yellow]")
-	
-	cap.release()
-	vout.release()
-	cv2.destroyAllWindows()
+		table.add_row("Video Source", "Ready", f"{width}x{height}@{fps}fps")
+		table.add_row("Object Detection", "Active", f"YOLO: ({object_config['model_type'].name})")
+		table.add_row("Distance Detection", "Active", "Single Camera")
+		table.add_row("Object Tracking", "Active", "BYTE Tracker")
+		console.print(table)
+		console.print("\n[bold cyan]Press 'Q' to quit simulation[/bold cyan]\n")
+		frame_count = 0
+		total_fps = 0
+		
+		while True:
+			frame_start = time.time()
+			
+			# Read frame (in thread pool to not block)
+			loop = asyncio.get_event_loop()
+			ret, frame = await loop.run_in_executor(thread_pool, cap.read)
+			if ret:
+				frame_show = frame.copy()
+				
+				# Run object detection in thread pool
+				def detect_objects():
+					objectDetector.DetectFrame(frame)
+					return time.time()
+				
+				# Run lane detection in thread pool    
+				def detect_lanes():
+					laneDetector.DetectFrame(frame)
+					return time.time()
+				
+				# Execute detections concurrently
+				object_time = time.time()
+				lane_time = time.time()
+				
+				object_future = loop.run_in_executor(thread_pool, detect_objects)
+				lane_future = loop.run_in_executor(thread_pool, detect_lanes)
+				
+				object_end_time, lane_end_time = await asyncio.gather(object_future, lane_future)
+				
+				obect_infer_time = round(object_end_time - object_time, 2)
+				lane_infer_time = round(lane_end_time - lane_time, 4)
+				
+				# Process tracking
+				if objectTracker:
+					box = [obj.tolist(format_type="xyxy") for obj in objectDetector.object_info]
+					score = [obj.conf for obj in objectDetector.object_info]
+					id = [obj.label for obj in objectDetector.object_info]
+					await loop.run_in_executor(thread_pool, objectTracker.update, box, score, id, frame)
+				
+				# Process analysis
+				await loop.run_in_executor(thread_pool, distanceDetector.updateDistance, objectDetector.object_info)
+				vehicle_distance = await loop.run_in_executor(
+					thread_pool, 
+					distanceDetector.calcCollisionPoint, 
+					laneDetector.lane_info.area_points
+				)
+				
+				if analyzeMsg.CheckStatus() and laneDetector.lane_info.area_status:
+					await loop.run_in_executor(
+						thread_pool,
+						transformView.updateTransformParams,
+						*laneDetector.lane_info.lanes_points[1:3],
+						analyzeMsg.transform_status
+					)
+				
+				birdview_show = await loop.run_in_executor(thread_pool, transformView.transformToBirdView, frame_show)
+				birdview_lanes_points = [transformView.transformToBirdViewPoints(lanes_point) for lanes_point in laneDetector.lane_info.lanes_points]
+				(vehicle_direction, vehicle_curvature) , vehicle_offset = transformView.calcCurveAndOffset(birdview_show, *birdview_lanes_points[1:3])
+				# Update status
+				analyzeMsg.UpdateCollisionStatus(vehicle_distance, laneDetector.lane_info.area_status)
+				analyzeMsg.UpdateOffsetStatus(vehicle_offset)
+				analyzeMsg.UpdateRouteStatus(vehicle_direction, vehicle_curvature)
+				
+				# Display results
+				transformView.DrawDetectedOnBirdView(birdview_show, birdview_lanes_points, analyzeMsg.offset_msg)
+				transformView.DrawTransformFrontalViewArea(frame_show)
+				laneDetector.DrawDetectedOnFrame(frame_show, analyzeMsg.offset_msg)
+				laneDetector.DrawAreaOnFrame(frame_show, displayPanel.CollisionDict[analyzeMsg.collision_msg])
+				objectDetector.DrawDetectedOnFrame(frame_show)
+				objectTracker.DrawTrackedOnFrame(frame_show, False)
+				distanceDetector.DrawDetectedOnFrame(frame_show)
+
+				displayPanel.DisplayBirdViewPanel(frame_show, birdview_show)
+				displayPanel.DisplaySignsPanel(frame_show, analyzeMsg.offset_msg, analyzeMsg.curvature_msg)	
+				displayPanel.DisplayCollisionPanel(frame_show, analyzeMsg.collision_msg, obect_infer_time, lane_infer_time )
+				
+				# Calculate and display FPS
+				frame_time = time.time() - frame_start
+				fps = 1 / frame_time
+				frame_count += 1
+				total_fps += fps
+				
+				if frame_count % 30 == 0:
+					avg_fps = total_fps / frame_count
+					console.print(f"[cyan]Frame {frame_count}[/cyan] | [yellow]FPS: {fps:.1f}[/yellow] | [green]Avg FPS: {avg_fps:.1f}[/green]", end="\r")
+				
+				# Write and show frame
+				await loop.run_in_executor(thread_pool, vout.write, frame_show)
+				cv2.imshow("ADAS Simulation", frame_show)
+				
+				if cv2.waitKey(1) & 0xFF == ord('q'):
+					break
+			else:
+				break
+		
+		# Cleanup
+		console.print("\n\n[bold green]✓ Simulation completed![/bold green]")
+		console.print(f"[yellow]• Processed {frame_count} frames[/yellow]")
+		console.print(f"[yellow]• Average FPS: {total_fps/frame_count:.1f}[/yellow]")
+		console.print("[yellow]• Output saved to: output.mp4[/yellow]")
+		
+		await loop.run_in_executor(thread_pool, cap.release)
+		await loop.run_in_executor(thread_pool, vout.release)
+		cv2.destroyAllWindows()
+		thread_pool.shutdown()
