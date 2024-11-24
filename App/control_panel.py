@@ -301,6 +301,7 @@ async def app_run(object_config, line_config, video_path):
 		table.add_row("Object Tracking", "Active", "BYTE Tracker")
 		console.print(table)
 		console.print("\n[bold cyan]Press 'Q' to quit simulation[/bold cyan]\n")
+		
 		frame_count = 0
 		total_fps = 0
 		
