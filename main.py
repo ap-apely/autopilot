@@ -18,6 +18,6 @@ async def main():
 		"model_type" : LaneModelType.UFLDV2_CULANE
 	}
     video_path = "video.mov"
-    await app_run(object_config, line_config, video_path)
+    await app_run(object_config, line_config, video_path=None,ev3_controller=None)
 
 asyncio.run(main())

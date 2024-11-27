@@ -59,7 +59,7 @@ class ControlPanel(object):
 						CurvatureType.HARD_RIGHT : (0, 0, 255)
 					}
 
-	def __init__(self):
+	def __init__(self, ev3_controller=None):
 		collision_warning_img = cv2.imread('./App/assets/FCWS-warning.png', cv2.IMREAD_UNCHANGED)
 		self.collision_warning_img = cv2.resize(collision_warning_img, (100, 100))
 		collision_prompt_img = cv2.imread('./App/assets/FCWS-prompt.png', cv2.IMREAD_UNCHANGED)
@@ -89,6 +89,8 @@ class ControlPanel(object):
 		self.start = time.time()
 
 		self.curve_status = None
+		self.ev3_controller = ev3_controller
+		self.simulation_mode = ev3_controller is None
 
 	def _updateFPS(self) :
 		"""
@@ -245,167 +247,239 @@ class ControlPanel(object):
 			if path_window is not None:
 				cv2.imshow("Path Planning", path_window)
 
-async def app_run(object_config, line_config, video_path):
-	console = Console()
-	
-	# Create a nice header
-	console.print("\n[bold cyan]🚗 ADAS Simulation System[/bold cyan]", justify="center")
-	console.print("[dim]Advanced Driver Assistance System[/dim]\n", justify="center")
-	
-	with console.status("[bold green]Loading system components...") as status:
-		start_time_loading = time.time()
-		
-		# Initialize read and save video 
-		console.print("[yellow]• Loading video source...[/yellow]")
-		cap = cv2.VideoCapture(video_path)
-		if (not cap.isOpened()):
-			console.print("[red bold]❌ Error: Video path is invalid. Please check it.[/red bold]")
-			raise Exception("video path is error. please check it.")
-			
-		width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
-		height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-		fps = int(cap.get(cv2.CAP_PROP_FPS))
-		fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-		vout = cv2.VideoWriter('./output.mp4', fourcc, fps, (width, height))
-		
-		console.print("[yellow]• Initializing detection models...[/yellow]")
-		# Initialize logger
-		LOGGER = logging.getLogger("YOLO")
-		LOGGER.setLevel(logging.INFO)
-		
-		# Initialize models
-		if ( "UFLDV2" in line_config["model_type"].name) :
-			UltrafastLaneDetectorV2.set_defaults(line_config)
-			laneDetector = UltrafastLaneDetectorV2(logger=LOGGER)
-		transformView = PerspectiveTransformation( (width, height) , logger=LOGGER)
-		YoloDetector.set_defaults(object_config)
-		objectDetector = YoloDetector(logger=LOGGER)
-		distanceDetector = SingleCamDistanceMeasure()
-		objectTracker = BYTETracker(names=objectDetector.colors_dict)
-		displayPanel = ControlPanel()
-		analyzeMsg = TaskConditions()
-		
-		# Create thread pool for CPU-bound operations
-		thread_pool = ThreadPoolExecutor(max_workers=4)
-		
-		loading_time = round(time.time() - start_time_loading, 2)
-		console.print(f"[bold green]✓ System loaded successfully in {loading_time}s![/bold green]\n")
-		table = Table(show_header=True, header_style="bold magenta")
-		table.add_column("Component", style="cyan")
-		table.add_column("Status", justify="right", style="green")
-		table.add_column("Time", justify="right", style="yellow")
-		
-		table.add_row("Video Source", "Ready", f"{width}x{height}@{fps}fps")
-		table.add_row("Object Detection", "Active", f"YOLO: ({object_config['model_type'].name})")
-		table.add_row("Distance Detection", "Active", "Single Camera")
-		table.add_row("Object Tracking", "Active", "BYTE Tracker")
-		console.print(table)
-		console.print("\n[bold cyan]Press 'Q' to quit simulation[/bold cyan]\n")
-		
-		frame_count = 0
-		total_fps = 0
-		
-		while True:
-			frame_start = time.time()
-			
-			# Read frame (in thread pool to not block)
-			loop = asyncio.get_event_loop()
-			ret, frame = await loop.run_in_executor(thread_pool, cap.read)
-			if ret:
-				frame_show = frame.copy()
-				
-				# Run object detection in thread pool
-				def detect_objects():
-					objectDetector.DetectFrame(frame)
-					return time.time()
-				
-				# Run lane detection in thread pool    
-				def detect_lanes():
-					laneDetector.DetectFrame(frame)
-					return time.time()
-				
-				# Execute detections concurrently
-				object_time = time.time()
-				lane_time = time.time()
-				
-				object_future = loop.run_in_executor(thread_pool, detect_objects)
-				lane_future = loop.run_in_executor(thread_pool, detect_lanes)
-				
-				object_end_time, lane_end_time = await asyncio.gather(object_future, lane_future)
-				
-				obect_infer_time = round(object_end_time - object_time, 2)
-				lane_infer_time = round(lane_end_time - lane_time, 4)
-				
-				# Process tracking
-				if objectTracker:
-					box = [obj.tolist(format_type="xyxy") for obj in objectDetector.object_info]
-					score = [obj.conf for obj in objectDetector.object_info]
-					id = [obj.label for obj in objectDetector.object_info]
-					await loop.run_in_executor(thread_pool, objectTracker.update, box, score, id, frame)
-				
-				# Process analysis
-				await loop.run_in_executor(thread_pool, distanceDetector.updateDistance, objectDetector.object_info)
-				vehicle_distance = await loop.run_in_executor(
-					thread_pool, 
-					distanceDetector.calcCollisionPoint, 
-					laneDetector.lane_info.area_points
-				)
-				
-				if analyzeMsg.CheckStatus() and laneDetector.lane_info.area_status:
-					await loop.run_in_executor(
-						thread_pool,
-						transformView.updateTransformParams,
-						*laneDetector.lane_info.lanes_points[1:3],
-						analyzeMsg.transform_status
-					)
-				
-				birdview_show = await loop.run_in_executor(thread_pool, transformView.transformToBirdView, frame_show)
-				birdview_lanes_points = [transformView.transformToBirdViewPoints(lanes_point) for lanes_point in laneDetector.lane_info.lanes_points]
-				(vehicle_direction, vehicle_curvature) , vehicle_offset = transformView.calcCurveAndOffset(birdview_show, *birdview_lanes_points[1:3])
-				# Update status
-				analyzeMsg.UpdateCollisionStatus(vehicle_distance, laneDetector.lane_info.area_status)
-				analyzeMsg.UpdateOffsetStatus(vehicle_offset)
-				analyzeMsg.UpdateRouteStatus(vehicle_direction, vehicle_curvature)
-				
-				# Display results
-				transformView.DrawDetectedOnBirdView(birdview_show, birdview_lanes_points, analyzeMsg.offset_msg)
-				transformView.DrawTransformFrontalViewArea(frame_show)
-				laneDetector.DrawDetectedOnFrame(frame_show, analyzeMsg.offset_msg)
-				laneDetector.DrawAreaOnFrame(frame_show, displayPanel.CollisionDict[analyzeMsg.collision_msg])
-				objectDetector.DrawDetectedOnFrame(frame_show)
-				objectTracker.DrawTrackedOnFrame(frame_show, False)
-				distanceDetector.DrawDetectedOnFrame(frame_show)
+	def process_webcam_feed(self):
+		cap = cv2.VideoCapture(0)  # Open the default camera
+		if not cap.isOpened():
+			LOGGER.error("Error: Could not open webcam.")
+			return
 
-				displayPanel.DisplayBirdViewPanel(frame_show, birdview_show)
-				displayPanel.DisplaySignsPanel(frame_show, analyzeMsg.offset_msg, analyzeMsg.curvature_msg)	
-				displayPanel.DisplayCollisionPanel(frame_show, analyzeMsg.collision_msg, obect_infer_time, lane_infer_time )
-				
-				# Calculate and display FPS
-				frame_time = time.time() - frame_start
-				fps = 1 / frame_time
-				frame_count += 1
-				total_fps += fps
-				
-				if frame_count % 30 == 0:
-					avg_fps = total_fps / frame_count
-					console.print(f"[cyan]Frame {frame_count}[/cyan] | [yellow]FPS: {fps:.1f}[/yellow] | [green]Avg FPS: {avg_fps:.1f}[/green]", end="\r")
-				
-				# Write and show frame
-				await loop.run_in_executor(thread_pool, vout.write, frame_show)
-				cv2.imshow("ADAS Simulation", frame_show)
-				
-				if cv2.waitKey(1) & 0xFF == ord('q'):
-					break
-			else:
+		while True:
+			ret, frame = cap.read()
+			if not ret:
+				LOGGER.error("Error: Could not read frame from webcam.")
 				break
-		
-		# Cleanup
-		console.print("\n\n[bold green]✓ Simulation completed![/bold green]")
-		console.print(f"[yellow]• Processed {frame_count} frames[/yellow]")
-		console.print(f"[yellow]• Average FPS: {total_fps/frame_count:.1f}[/yellow]")
-		console.print("[yellow]• Output saved to: output.mp4[/yellow]")
-		
-		await loop.run_in_executor(thread_pool, cap.release)
-		await loop.run_in_executor(thread_pool, vout.release)
+
+			# Process the frame (e.g., lane detection, object detection)
+			# Example: Use lane detection to decide EV3 movement
+			lane_offset, curvature = self.analyze_frame(frame)
+			self.control_ev3(lane_offset, curvature)
+
+			# Display the frame
+			cv2.imshow('Webcam Feed', frame)
+			if cv2.waitKey(1) & 0xFF == ord('q'):
+				break
+
+		cap.release()
 		cv2.destroyAllWindows()
-		thread_pool.shutdown()
+
+	def analyze_frame(self, frame):
+		# Placeholder for frame analysis logic
+		# Return dummy values for lane offset and curvature
+		return OffsetType.CENTER, CurvatureType.STRAIGHT
+
+	def control_ev3(self, lane_offset, curvature):
+		# Simulate EV3 control logic based on lane offset and curvature
+		command = ""
+		if lane_offset == OffsetType.CENTER:
+			command = "Move Forward"
+			if not self.simulation_mode:
+				self.ev3_controller.move_forward()
+		elif lane_offset == OffsetType.LEFT:
+			command = "Turn Left"
+			if not self.simulation_mode:
+				self.ev3_controller.turn_left()
+		elif lane_offset == OffsetType.RIGHT:
+			command = "Turn Right"
+			if not self.simulation_mode:
+				self.ev3_controller.turn_right()
+
+		# Display the command in simulation mode
+		if self.simulation_mode:
+			print(f"Simulated Command: {command}")
+
+async def app_run(object_config, line_config, video_path=None, ev3_controller=None):
+    """
+    Run the Advanced Driver Assistance System (ADAS) simulation.
+
+    This function initializes and runs the ADAS simulation system, processing video frames
+    for object detection, lane detection, and other ADAS functionalities. It displays
+    the processed frames with visualizations of detected lanes, objects, and other relevant
+    information. The simulation can be terminated by pressing 'Q'.
+
+    Args:
+        object_config (dict): Configuration for the object detection model.
+        line_config (dict): Configuration for the lane detection model.
+        video_path (str, optional): Path to the input video file. If None, uses webcam.
+        ev3_controller (object, optional): Controller for the EV3 robot.
+
+    Raises:
+        Exception: If the video path is invalid or cannot be opened.
+    """
+    console = Console()
+    
+    # Create a nice header
+    console.print("\n[bold cyan]🚗 ADAS Simulation System[/bold cyan]", justify="center")
+    console.print("[dim]Advanced Driver Assistance System[/dim]\n", justify="center")
+    
+    with console.status("[bold green]Loading system components...") as status:
+        start_time_loading = time.time()
+        
+        # Initialize read and save video 
+        console.print("[yellow]• Loading video source...[/yellow]")
+        cap = cv2.VideoCapture(video_path if video_path else 0)
+        if (not cap.isOpened()):
+            console.print("[red bold]❌ Error: Could not open video source. Please check it.[/red bold]")
+            raise Exception("Video source error. Please check it.")
+
+        # Set camera resolution to 1080p
+        if not video_path:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1080)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) 
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        vout = cv2.VideoWriter('./output.mp4', fourcc, fps, (width, height))
+        
+        console.print("[yellow]• Initializing detection models...[/yellow]")
+        # Initialize logger
+        LOGGER = logging.getLogger("YOLO")
+        LOGGER.setLevel(logging.INFO)
+        
+        # Initialize models
+        if ( "UFLDV2" in line_config["model_type"].name) :
+            UltrafastLaneDetectorV2.set_defaults(line_config)
+            laneDetector = UltrafastLaneDetectorV2(logger=LOGGER)
+        transformView = PerspectiveTransformation( (width, height) , logger=LOGGER)
+        YoloDetector.set_defaults(object_config)
+        objectDetector = YoloDetector(logger=LOGGER)
+        distanceDetector = SingleCamDistanceMeasure()
+        objectTracker = BYTETracker(names=objectDetector.colors_dict)
+        displayPanel = ControlPanel(ev3_controller)
+        analyzeMsg = TaskConditions()
+        
+        # Create thread pool for CPU-bound operations
+        thread_pool = ThreadPoolExecutor(max_workers=4)
+        
+        loading_time = round(time.time() - start_time_loading, 2)
+        console.print(f"[bold green]✓ System loaded successfully in {loading_time}s![bold green]\n")
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Component", style="cyan")
+        table.add_column("Status", justify="right", style="green")
+        table.add_column("Time", justify="right", style="yellow")
+        
+        table.add_row("Video Source", "Ready", f"{width}x{height}@{fps}fps")
+        table.add_row("Object Detection", "Active", f"YOLO: ({object_config['model_type'].name})")
+        table.add_row("Distance Detection", "Active", "Single Camera")
+        table.add_row("Object Tracking", "Active", "BYTE Tracker")
+        console.print(table)
+        console.print("\n[bold cyan]Press 'Q' to quit simulation[bold cyan]\n")
+        
+        frame_count = 0
+        total_fps = 0
+        
+        while True:
+            frame_start = time.time()
+            
+            # Read frame (in thread pool to not block)
+            loop = asyncio.get_event_loop()
+            ret, frame = await loop.run_in_executor(thread_pool, cap.read)
+            if ret:
+                frame_show = frame.copy()
+                
+                # Run object detection in thread pool
+                def detect_objects():
+                    objectDetector.DetectFrame(frame)
+                    return time.time()
+                
+                # Run lane detection in thread pool    
+                def detect_lanes():
+                    laneDetector.DetectFrame(frame)
+                    return time.time()
+                
+                # Execute detections concurrently
+                object_time = time.time()
+                lane_time = time.time()
+                
+                object_future = loop.run_in_executor(thread_pool, detect_objects)
+                lane_future = loop.run_in_executor(thread_pool, detect_lanes)
+                
+                object_end_time, lane_end_time = await asyncio.gather(object_future, lane_future)
+                
+                obect_infer_time = round(object_end_time - object_time, 2)
+                lane_infer_time = round(lane_end_time - lane_time, 4)
+                
+                # Process tracking
+                if objectTracker:
+                    box = [obj.tolist(format_type="xyxy") for obj in objectDetector.object_info]
+                    score = [obj.conf for obj in objectDetector.object_info]
+                    id = [obj.label for obj in objectDetector.object_info]
+                    await loop.run_in_executor(thread_pool, objectTracker.update, box, score, id, frame)
+                
+                # Process analysis
+                await loop.run_in_executor(thread_pool, distanceDetector.updateDistance, objectDetector.object_info)
+                vehicle_distance = await loop.run_in_executor(
+                    thread_pool, 
+                    distanceDetector.calcCollisionPoint, 
+                    laneDetector.lane_info.area_points
+                )
+                
+                if analyzeMsg.CheckStatus() and laneDetector.lane_info.area_status:
+                    await loop.run_in_executor(
+                        thread_pool,
+                        transformView.updateTransformParams,
+                        *laneDetector.lane_info.lanes_points[1:3],
+                        analyzeMsg.transform_status
+                    )
+                
+                birdview_show = await loop.run_in_executor(thread_pool, transformView.transformToBirdView, frame_show)
+                birdview_lanes_points = [transformView.transformToBirdViewPoints(lanes_point) for lanes_point in laneDetector.lane_info.lanes_points]
+                (vehicle_direction, vehicle_curvature) , vehicle_offset = transformView.calcCurveAndOffset(birdview_show, *birdview_lanes_points[1:3])
+                # Update status
+                analyzeMsg.UpdateCollisionStatus(vehicle_distance, laneDetector.lane_info.area_status)
+                analyzeMsg.UpdateOffsetStatus(vehicle_offset)
+                analyzeMsg.UpdateRouteStatus(vehicle_direction, vehicle_curvature)
+                
+                # Display results
+                transformView.DrawDetectedOnBirdView(birdview_show, birdview_lanes_points, analyzeMsg.offset_msg)
+                transformView.DrawTransformFrontalViewArea(frame_show)
+                laneDetector.DrawDetectedOnFrame(frame_show, analyzeMsg.offset_msg)
+                laneDetector.DrawAreaOnFrame(frame_show, displayPanel.CollisionDict[analyzeMsg.collision_msg])
+                objectDetector.DrawDetectedOnFrame(frame_show)
+                objectTracker.DrawTrackedOnFrame(frame_show, False)
+                distanceDetector.DrawDetectedOnFrame(frame_show)
+
+                displayPanel.DisplayBirdViewPanel(frame_show, birdview_show)
+                displayPanel.DisplaySignsPanel(frame_show, analyzeMsg.offset_msg, analyzeMsg.curvature_msg)    
+                displayPanel.DisplayCollisionPanel(frame_show, analyzeMsg.collision_msg, obect_infer_time, lane_infer_time )
+                
+                # Calculate and display FPS
+                frame_time = time.time() - frame_start
+                fps = 1 / frame_time
+                frame_count += 1
+                total_fps += fps
+                
+                if frame_count % 30 == 0:
+                    avg_fps = total_fps / frame_count
+                    console.print(f"[cyan]Frame {frame_count}[cyan] | [yellow]FPS: {fps:.1f}[yellow] | [green]Avg FPS: {avg_fps:.1f}[green]", end="\r")
+                
+                # Write and show frame
+                await loop.run_in_executor(thread_pool, vout.write, frame_show)
+                cv2.imshow("ADAS Simulation", frame_show)
+                
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            else:
+                break
+        
+        # Cleanup
+        console.print("\n\n[bold green]✓ Simulation completed![bold green]")
+        console.print(f"[yellow]• Processed {frame_count} frames[yellow]")
+        console.print(f"[yellow]• Average FPS: {total_fps/frame_count:.1f}[yellow]")
+        console.print("[yellow]• Output saved to: output.mp4[yellow]")
+        
+        await loop.run_in_executor(thread_pool, cap.release)
+        await loop.run_in_executor(thread_pool, vout.release)
+        cv2.destroyAllWindows()
+        thread_pool.shutdown()
