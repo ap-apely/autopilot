@@ -1,8 +1,7 @@
 
 /Lines/__pycache__
 /Engine/__pycache__
-*.mp4
-*.mov
 .gitattributes
 *.pyc
 *.trt
+output.mp4
