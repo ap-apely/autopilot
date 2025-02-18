@@ -15,8 +15,8 @@ A comprehensive autonomous vehicle simulation system featuring real-time path pl
 ## Overview
 
 This ADAS simulation system combines multiple AI and computer vision components to create a comprehensive autonomous driving assistant. Key features include:
-- 🎯 **Real-time Object Detection** using YOLOv8
-- 🛣️ **Lane Detection** with UltrafastLaneDetectorV2
+- 🎯 **Real-time Object Detection** using YOLOv11
+- 🛣️ **Lane Detection** with UltrafastLaneDetectionV2
 - 🗺️ **Path Planning** using optimized A* algorithm
 - 👁️ **Object Tracking** with BYTE Tracker
 - 📏 **Distance Measurement** using single camera
@@ -59,7 +59,7 @@ autopilot/
 
 3. **Download model weights:**
    - YOLOv8 weights
-   - UltrafastLaneDetectorV2 weights
+   - UltrafastLaneDetectionV2 weights
 
 ## 🚀 Usage
 
@@ -81,7 +81,7 @@ Controls:
 - Configurable through object_config dictionary
 
 ### Lane Detection
-- UltrafastLaneDetectorV2 implementation
+- UltrafastLaneDetectionV2 implementation
 - Bird's eye view transformation
 - Real-time lane curvature and vehicle offset calculation
 
