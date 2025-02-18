@@ -76,7 +76,7 @@ Controls:
 ## 🧠 System Architecture
 
 ### Object Detection
-- Uses YOLOv8 detector (supports v5, v8, v10)
+- Uses YOLOv11 detector (supports v5, v8, v10)
 - Real-time detection of vehicles, pedestrians, and obstacles
 - Configurable through object_config dictionary
 
@@ -101,7 +101,7 @@ The system uses configuration dictionaries for flexible setup:
 
 ```python
 object_config = {
-    "model_type": YOLOv8,
+    "model_type": YOLOv11,
     "confidence_threshold": 0.5,
     "nms_threshold": 0.4
 }
