@@ -1,4 +1,4 @@
-# 🚗 Advanced Driver Assistance System (ADAS) Simulation
+# 🚗 Autopilot: Advanced Driving Intelligence 
 
 A comprehensive autonomous vehicle simulation system featuring real-time path planning, object detection, and lane tracking capabilities. This project implements cutting-edge computer vision and AI techniques to create a robust driver assistance system.
 
